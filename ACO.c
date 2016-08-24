@@ -4,10 +4,11 @@
 #include "mpi.h"
 #include <math.h>
 #include <float.h>
-#define TEOR_EVAPORACAO 0.3
+#define TEOR_EVAPORACAO 0.2
 #define FEROMONIO_INICIAL 1
 #define Q 1
-#define CONT_MAX 5
+#define CONT_MAX 10
+#define FEROMONIO_MINIMO 0.1
 
 int n;
 double** qualidade;
@@ -27,7 +28,8 @@ Node* cidades;
 Ant formiga;
 
 int* melhorCaminho;
-int menorDistancia=0, cont=0;
+double menorDistancia=0;
+int cont=0;
 
 double euclidiana(double x1, double y1,double x2, double y2){
 	return (sqrt(pow(x1-x2,2)+pow(y1-y2,2)));
@@ -37,7 +39,7 @@ void inicializarValores();
 void inicializarMatrizes();
 double somatorioFeromonioQualidade();
 double probabilidade(int i,int j);
-void atualizarFeromonio(int i, int j);
+void atualizarFeromonio(int i, int j, double valor);
 void evaporarFeromonio();
 int jaVisitou(int cidadeIdx);
 void liberarMemoria();
@@ -66,25 +68,28 @@ int main(int argc, char** argv){
 		inicializarMatrizes();
 	}	
 
+	int proxima,i,j;
 	formiga.visitadas = malloc((n+1)*sizeof(int));
+	for(i =0;i<n;i++){
+		MPI_Bcast(&cidades[i],1, MPI_DOUBLE,0, MPI_COMM_WORLD);
+		for(j=0;j<n;j++){
+			MPI_Bcast(&qualidade[i][j],1, MPI_DOUBLE,0, MPI_COMM_WORLD);
+		}
+	}
 	int atual = rank;
-	//while(cont < CONT_MAX){
-	for(int k=0;k<5;k++){
+	while(cont < CONT_MAX){
 
-		int proxima,i,j;
 		//enviando as matrizes de qualidade e feromonio para os outros processos
 		MPI_Barrier(MPI_COMM_WORLD);
 		for(i =0;i<n;i++){
-			MPI_Bcast(&cidades[i],1, MPI_DOUBLE,0, MPI_COMM_WORLD);
 			for(j=0;j<n;j++){
-				MPI_Bcast(&qualidade[i][j],1, MPI_DOUBLE,0, MPI_COMM_WORLD);
 				MPI_Bcast(&feromonio[i][j],1, MPI_DOUBLE,0, MPI_COMM_WORLD);
 			}
 		}
 		
 		//inicializando variaveis
 		formiga.visitadas[0] = atual;
-		for(i = 1;i<n;i++){
+		for(i = 1;i<=n;i++){
 			formiga.visitadas[i] = -1;
 		}
 		formiga.caminho = 0;
@@ -102,46 +107,73 @@ int main(int argc, char** argv){
 			}
 			formiga.visitadas[i] = proxima;		
 			formiga.caminho += 1/qualidade[atual][proxima];
-			atualizarFeromonio(atual,proxima);
+			atualizarFeromonio(atual,proxima,formiga.caminho);
 			atual = proxima;		
 		}
 
 		//parte em que a formiga volta para a cidade inicial
 		formiga.visitadas[n] = formiga.visitadas[0];
 		formiga.caminho += 1/qualidade[atual][formiga.visitadas[0]];
+		atualizarFeromonio(atual,formiga.visitadas[0],formiga.caminho);
+		atual = formiga.visitadas[0];
 
-		//enviando os caminhos percorridos e vendo qual o menor
-		MPI_Send(&formiga.caminho, 1, MPI_DOUBLE, 0, rank, MPI_COMM_WORLD);		
-		//MPI_Send(formiga.visitadas, n, MPI_INT, 0, rank, MPI_COMM_WORLD);	
+		//enviando os caminhos percorridos e vendo qual o menor	
+		MPI_Send(formiga.visitadas, n+1, MPI_INT, 0, rank, MPI_COMM_WORLD);	
 		if(rank == 0){
 			double distancia,menor = DBL_MAX;
-			//int caminhos[n];		
+			int caminhos[n+1];
+			Ant f;			
 			for(i=0;i<n;i++){
-				MPI_Recv(&distancia, 1, MPI_DOUBLE, MPI_ANY_SOURCE,MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-				//MPI_Recv(caminhos, n, MPI_INT, MPI_ANY_SOURCE,MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+				MPI_Recv(caminhos, n+1, MPI_INT, MPI_ANY_SOURCE,MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+				f.visitadas = caminhos;
+				f.caminho = 0;
+				for(j=0;j<n;j++){
+					f.caminho += 1/qualidade[caminhos[j]][caminhos[j+1]];
+					//printf("atualizando feromonio em %d %d\n", caminhos[j],caminhos[j+1]);
+					atualizarFeromonio(caminhos[j],caminhos[j+1],f.caminho);
+				}
+				distancia = f.caminho;
 				if(distancia < menor){
 					menor = distancia;
-					//melhorCaminho = caminhos;
+					for(j=0;j<n+1;j++){
+						melhorCaminho[j] = caminhos[j];
+					}
 				}
 			}
-			printf("%lf\n", menor);
 			if(menorDistancia == menor){
 				cont++;
 			} else {
-				menorDistancia = menor;
 				cont = 0;
-			}		
+			}
+			menorDistancia = menor;
+			/*for(i=0;i<n;i++){
+				for(j=0;j<n;j++){
+					printf("%lf ",feromonio[i][j]);
+				}
+				printf("\n");
+			}*/
+			printf("\n");
+			evaporarFeromonio();			
 		}
+		MPI_Bcast(&menorDistancia,1, MPI_DOUBLE,0, MPI_COMM_WORLD);
+		MPI_Bcast(&cont,1, MPI_DOUBLE,0, MPI_COMM_WORLD);
 
-		MPI_Barrier(MPI_COMM_WORLD);
-		enviarMatrizFeromonios(rank);
-		receberMatrizFeromonios(rank);
-		
+		MPI_Barrier(MPI_COMM_WORLD);		
 		printf("A formiga %d visitou: [",rank);
 		for(i =0;i<=n;i++){
 			printf("%d ",formiga.visitadas[i]);
 		}
 		printf("] distancia = %lf\n",formiga.caminho);
+	}
+
+	MPI_Barrier(MPI_COMM_WORLD);
+	if(rank == 0){
+		int i;
+		printf("Melhor caminho obtido foi: ");
+		for(i =0;i<n+1;i++){
+			printf("%d ",melhorCaminho[i]);
+		}
+		printf(" -> distancia:%lf\n", menorDistancia);
 	}
 
 	liberarMemoria();
@@ -154,8 +186,6 @@ int main(int argc, char** argv){
 void inicializarValores(){
 	scanf("%d",&n);
 	cidades = malloc(n*sizeof(Node));
-	melhorCaminho = malloc(n*sizeof(int));	
-
 	int i=0,j=0;
 	//inicializando matriz de distancias
 	for(i=0;i<n;i++){
@@ -169,7 +199,7 @@ void inicializarValores(){
 				qualidade[i][j] = -1;
 				feromonio[i][j] = -1;
 			} else {
-				qualidade[i][j] = 1/euclidiana(cidades[i].x,cidades[j].x,cidades[i].y,cidades[j].y);
+				qualidade[i][j] = 1/euclidiana(cidades[i].x,cidades[i].y,cidades[j].x,cidades[j].y);
 				feromonio[i][j] = FEROMONIO_INICIAL;			
 			}
 		}
@@ -177,6 +207,7 @@ void inicializarValores(){
 }
 
 void inicializarMatrizes(){
+	melhorCaminho = malloc((n+1)*sizeof(int));
 	int i=0,j=0;
 	//inicializando matriz qualidade e feromonio
 	feromonio = malloc(n*sizeof(double*));
@@ -205,17 +236,17 @@ double probabilidade(int i,int j){
 	);
 }
 
-void atualizarFeromonio(int i, int j){
-	feromonio[i][j]+=Q/formiga.caminho;
+void atualizarFeromonio(int i, int j,double valor){
+	feromonio[i][j]+=Q/valor;
 }
 
 void evaporarFeromonio(){
 	int i,j;
 	for(i=0;i<n;i++){
 		for(j=0;j<n;j++){
-			feromonio[i][j] *= (1-TEOR_EVAPORACAO);
-			if(feromonio[i][j] < 0)
-				feromonio[i][j] = 0;
+			feromonio[i][j] -= FEROMONIO_INICIAL*(1-TEOR_EVAPORACAO);
+			if(feromonio[i][j] < FEROMONIO_MINIMO)
+				feromonio[i][j] = FEROMONIO_MINIMO;
 		}
 	}
 }
@@ -229,31 +260,6 @@ int jaVisitou(int cidadeIdx){
 	}	
 	
 	return 0;
-}
-
-void enviarMatrizFeromonios(int tag){
-	int i,j;
-	for(i =0;i<n;i++){
-		for(j=0;j<n;j++){
-			MPI_Send(&feromonio[i][j], 1, MPI_DOUBLE, 0, tag, MPI_COMM_WORLD);
-		}
-	}
-}
-
-void receberMatrizFeromonios(int rank){
-	int i,j;
-	if(rank == 0){
-		for(i =0;i<n;i++){
-			for(j=0;j<n;j++){
-				double feromonioRecv;
-				MPI_Recv(&feromonioRecv, 1, MPI_DOUBLE, MPI_ANY_SOURCE,MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-				if(feromonioRecv != feromonio[i][j]){
-					feromonio[i][j] += feromonioRecv-FEROMONIO_INICIAL;
-				}
-			}
-		}
-		evaporarFeromonio();
-	}
 }
 
 void liberarMemoria(){
